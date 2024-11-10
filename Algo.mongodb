@@ -1,0 +1,168 @@
+const userSchema = {
+  _id: ObjectId,
+  name: String,
+  preferences: [{
+    category: String,
+    weight: Number
+  }],
+  bookingHistory: [{
+    itemId: ObjectId,
+    rating: Number,
+    timestamp: Date
+  }],
+  location: {
+    coordinates: [Number],  // [longitude, latitude]
+    type: { type: String, default: 'Point' }
+  }
+};
+
+const itemSchema = {
+  _id: ObjectId,
+  name: String,
+  category: String,
+  tags: [String],
+  rating: Number,
+  totalBookings: Number,
+  location: {
+    coordinates: [Number],  // [longitude, latitude]
+    type: { type: String, default: 'Point' }
+  },
+  availability: [{
+    date: Date,
+    slots: [{
+      time: String,
+      isBooked: Boolean
+    }]
+  }]
+};
+
+// Recommendation Algo
+class RecommendationEngine {
+  constructor() {
+    this.weights = {
+      userPreference: 0.3,
+      popularity: 0.2,
+      rating: 0.2,
+      location: 0.15,
+      availability: 0.15
+    };
+  }
+
+  async getRecommendations(userId, searchParams) {
+    try {
+      // Get user data
+      const user = await User.findById(userId)
+        .populate('bookingHistory');
+
+      // Get available items based on initial filters
+      let items = await Item.find({
+        'availability.date': searchParams.date,
+        'availability.slots.isBooked': false
+      });
+
+      // Calculate scores for each item
+      const scoredItems = await Promise.all(items.map(async item => {
+        const score = await this.calculateScore(item, user, searchParams);
+        return { item, score };
+      }));
+
+      // Sort items by score and return top recommendations
+      return scoredItems
+        .sort((a, b) => b.score - a.score)
+        .slice(0, searchParams.limit || 10)
+        .map(item => item.item);
+
+    } catch (error) {
+      console.error('Error in recommendation engine:', error);
+      throw error;
+    }
+  }
+
+  async calculateScore(item, user, searchParams) {
+    const scores = {
+      // Calculate preference score based on user's category preferences
+      userPreference: this.calculatePreferenceScore(item, user),
+      
+      // Calculate popularity score based on total bookings
+      popularity: this.calculatePopularityScore(item),
+      
+      // Use existing rating
+      rating: item.rating / 5,
+      
+      // Calculate distance-based location score
+      location: this.calculateLocationScore(
+        item.location.coordinates,
+        user.location.coordinates
+      ),
+      
+      // Calculate availability score
+      availability: this.calculateAvailabilityScore(item, searchParams.date)
+    };
+
+    // Calculate weighted sum of all scores
+    return Object.keys(this.weights).reduce((total, key) => {
+      return total + (scores[key] * this.weights[key]);
+    }, 0);
+  }
+
+  calculatePreferenceScore(item, user) {
+    if (!user.preferences.length) return 0.5; // Default score for new users
+    
+    const relevantPreference = user.preferences.find(p => 
+      p.category === item.category
+    );
+    
+    return relevantPreference ? relevantPreference.weight : 0.3;
+  }
+
+  calculatePopularityScore(item) {
+    // Normalize based on a reasonable maximum booking count
+    const MAX_BOOKINGS = 1000;
+    return Math.min(item.totalBookings / MAX_BOOKINGS, 1);
+  }
+
+  calculateLocationScore(itemCoords, userCoords) {
+    if (!userCoords || !itemCoords) return 0.5;
+
+    // Calculate distance using Haversine formula
+    const distance = this.calculateHaversineDistance(
+      itemCoords[1], itemCoords[0],
+      userCoords[1], userCoords[0]
+    );
+
+    // Convert distance to a score (closer = higher score)
+    const MAX_DISTANCE = 50; // km
+    return Math.max(0, 1 - (distance / MAX_DISTANCE));
+  }
+
+  calculateAvailabilityScore(item, searchDate) {
+    const dateAvailability = item.availability.find(a => 
+      a.date.toDateString() === new Date(searchDate).toDateString()
+    );
+
+    if (!dateAvailability) return 0;
+
+    // Calculate percentage of available slots
+    const availableSlots = dateAvailability.slots.filter(slot => !slot.isBooked).length;
+    return availableSlots / dateAvailability.slots.length;
+  }
+
+  calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371; // Earth's radius in km
+    const dLat = this.toRad(lat2 - lat1);
+    const dLon = this.toRad(lon2 - lon1);
+    
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(this.toRad(lat1)) * Math.cos(this.toRad(lat2)) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  }
+
+  toRad(degrees) {
+    return degrees * Math.PI / 180;
+  }
+}
+
